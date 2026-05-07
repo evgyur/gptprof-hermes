@@ -1,0 +1,16 @@
+{
+  "name": "codex-profile-switcher",
+  "version": "0.1.0",
+  "description": "OpenClaw Telegram command for switching OpenAI Codex OAuth profiles",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.3.22",
+      "minGatewayVersion": "2026.3.22"
+    }
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.22"
+  }
+}

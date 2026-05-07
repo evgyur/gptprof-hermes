@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+state.json
+auth.json
+*.log
+tmp/
+.env
+.DS_Store

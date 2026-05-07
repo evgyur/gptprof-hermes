@@ -1,0 +1,48 @@
+{
+  "id": "codex-profile-switcher",
+  "name": "GPT Profile Switcher",
+  "description": "Telegram /gptprof buttons for OpenAI-Codex profiles, native Codex trial routing, Pi fallback, and session aliases /gptt /mmfast.",
+  "activation": {
+    "onStartup": true
+  },
+  "commandAliases": [
+    {
+      "name": "gptprof",
+      "kind": "runtime-slash"
+    },
+    {
+      "name": "gptt",
+      "kind": "runtime-slash"
+    },
+    {
+      "name": "gptpro",
+      "kind": "runtime-slash"
+    }
+  ],
+  "contracts": {
+    "tools": [
+      "gptprof"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean"
+      },
+      "managerPath": {
+        "type": "string"
+      },
+      "pythonCommand": {
+        "type": "string"
+      },
+      "timeoutMs": {
+        "type": "number"
+      },
+      "restartAfterSwitch": {
+        "type": "boolean"
+      }
+    }
+  }
+}
