@@ -19,7 +19,7 @@ from pathlib import Path
 
 # ── Config (override via env) ────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHIP_DM            = os.getenv("CHIP_DM", "")          # e.g. "617744661"
+CHIP_DM            = os.getenv("CHIP_DM", "")          # e.g. "123456789"
 AUTH_PATH          = os.getenv("HERMES_AUTH", "/home/hermes/.hermes/auth.json")
 CONFIG_PATH        = os.getenv("HERMES_CONFIG", "/home/hermes/.hermes/config.yaml")
 HCP_DIR            = os.getenv("HERMES_HCP", "/home/hermes/.hermes/skills/chip/hcp")
