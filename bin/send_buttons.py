@@ -27,13 +27,16 @@ USAGE_URL          = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_TIMEOUT      = 8
 CACHE_MAX_AGE      = 15 * 60   # seconds
 
+# (slug, plan, model_name, emoji)
+# model_name must match what Hermes /model command expects (e.g. gpt-5.5, gpt-5.4, gpt-5.4-mini)
 PROFILES = [
-    ("gptinvest23",  "Pro $200",    "🤖"),
-    ("markov495",    "ProLite $100","⚡"),
-    ("mintsage",     "Plus $20",    "✨"),
-    ("omnifocusme",  "Plus $20",    "🎯"),
+    ("gptinvest23",  "Pro $200",    "gpt-5.5",      "🤖"),
+    ("markov495",    "ProLite $100","gpt-5.4",      "⚡"),
+    ("mintsage",     "Plus $20",    "gpt-5.4-mini", "✨"),
+    ("omnifocusme",  "Plus $20",    "gpt-5.4-mini", "🎯"),
 ]
-PROFILE_EMOJI = {slug: emoji for slug, _, emoji in PROFILES}
+PROFILE_EMOJI = {slug: emoji for slug, _, _, emoji in PROFILES}
+PROFILE_MODEL = {slug: model for slug, _, model, _ in PROFILES}
 
 _CACHE = "/tmp/gptprof_usage_cache.json"
 
@@ -171,17 +174,19 @@ async def main():
     cur_lbl   = usage.get(current_slug, (None, None, "—"))[2]
     header = f"{cur_emoji} *{current_slug}* ({cur_plan}) — {cur_lbl}"
 
-    # buttons
+    # buttons — callback_data includes model for gateway handler
     rows = []
-    for slug, plan, emoji in PROFILES:
+    for slug, plan, model, emoji in PROFILES:
         p, s, lbl = usage.get(slug, (None, None, "—"))
         parts = [emoji]
         if slug == current_slug:
             parts.insert(0, "✓")
         parts.extend([slug, f"({lbl})"])
+        # callback_data format: "gptprof:<slug>:<model>"
+        # Gateway parses this as profile + model for config.yaml write
         rows.append([InlineKeyboardButton(
             " ".join(parts),
-            callback_data=f"gptprof:{slug}"
+            callback_data=f"gptprof:{slug}:{model}"
         )])
 
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="gptprof:cancel")])
@@ -191,7 +196,8 @@ async def main():
         f"{header}\n"
         f"`📦 {current_model}`\n\n"
         "Выбери профиль:\n\n"
-        "_(После выбора нажми /new)_"
+        "_(После выбора нажми /new)_\n"
+        "_(Изменение сохраняется глобально — переживает /restart)_"
     )
 
     await bot.send_message(

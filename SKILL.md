@@ -1,6 +1,6 @@
 ---
 name: gptprof-hermes
-description: "Public Hermes skill: ChatGPT profile card with Telegram inline buttons showing remaining %, /gptt /mmfast aliases, autoswitch on limit exhaustion. Wraps gptprof-public codex-profile-manager.py."
+description: "Public Hermes skill: ChatGPT profile card with Telegram inline buttons showing remaining %, /gptt /mmfast aliases (both persistent --global), autoswitch on limit exhaustion. Callback writes global config.yaml — not just session override."
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool
@@ -17,8 +17,8 @@ Hermes-native skill for ChatGPT profile management: Telegram card with inline bu
 | Slash | Action |
 |-------|--------|
 | `/gptprof` | Show profile selection card with inline buttons (remaining % 5h / weekly per button) |
-| `/gptt` | Switch to `gpt-5.5` via `openai-codex` provider (alias → `/model gpt-5.5 --provider openai-codex`) |
-| `/mmfast` | Switch back to `MiniMax-M2.7` with high reasoning (alias → `/model MiniMax-M2.7 --provider minimax --global`) |
+| `/gptt` | Switch to `gpt-5.5` via `openai-codex` provider, **persistent** (`--global`) |
+| `/mmfast` | Switch back to `MiniMax-M2.7` with high reasoning, **persistent** (`--global`) |
 | `/gptprof status` | Full CLI status via `codex-profile-manager.py status` |
 | `/gptprof refresh` | Force-refresh usage cache |
 | `/gptprof autoswitch` | Run autoswitch logic (switches only if active is ≥95% and a healthy spare exists) |
@@ -29,8 +29,28 @@ Hermes-native skill for ChatGPT profile management: Telegram card with inline bu
 2. Fetches usage from `https://chatgpt.com/backend-api/wham/usage` for each profile in parallel
 3. Computes **remaining %** = `100 − used_percent` for both windows
 4. Sends a Telegram `InlineKeyboardMarkup` card to `$CHIP_DM`
-5. Each button carries `callback_data: "gptprof:<slug>"`
-6. After pressing a button → `/new` to reset context
+5. Each button carries `callback_data: "gptprof:<slug>:<model>"` (e.g. `gptprof:omnifocusme:gpt-5.4-mini`)
+6. After pressing a button → recommended `/new` to reset context
+
+## Callback Behavior (critical)
+
+Button presses are handled by **Hermes gateway** (`gateway/platforms/telegram.py`), not by `send_buttons.py`.
+
+On `gptprof:<slug>:<model>` callback, the gateway:
+
+1. Copies `access_token` + `refresh_token` from `~/.hermes/skills/chip/hcp/<slug>.json` → `auth.json → codex`
+2. **Writes global config.yaml**:
+   ```python
+   cfg["model"] = model          # e.g. "gpt-5.4-mini"
+   cfg["provider"] = "openai-codex"
+   ```
+   This is equivalent to `/model <model> --provider openai-codex --global`.
+3. Sets session override at gateway level
+4. Evicts cached agent
+
+**Why this matters:** Without step 2, gateway restarts would reset the model back to the pre-switch default. With step 2, the model is persisted in `config.yaml` and survives restarts.
+
+See `references/callback-behavior.md` for full details.
 
 ## Environment Variables
 
@@ -39,7 +59,7 @@ Hermes-native skill for ChatGPT profile management: Telegram card with inline bu
 | `TELEGRAM_BOT_TOKEN` | env | Bot token for sending cards |
 | `CHIP_DM` | env | Telegram chat ID for card delivery |
 | `HERMES_AUTH` | `/home/hermes/.hermes/auth.json` | Active profile detection |
-| `HERMES_CONFIG` | `/home/hermes/.hermes/config.yaml` | Model name display |
+| `HERMES_CONFIG` | `/home/hermes/.hermes/config.yaml` | Model name display + global persistence |
 | `HERMES_HCP` | `/home/hermes/.hermes/skills/chip/hcp` | Profile token directory |
 
 ## Profile Token Directory
@@ -62,7 +82,7 @@ Each file must contain an `access_token` key. The active profile is read from `a
 quick_commands:
   gptt:
     type: alias
-    target: /model gpt-5.5 --provider openai-codex
+    target: /model gpt-5.5 --provider openai-codex --global
   mmfast:
     type: alias
     target: /model MiniMax-M2.7 --provider minimax --global
@@ -70,6 +90,8 @@ quick_commands:
     type: exec
     command: /opt/hermes-agent/venv/bin/python3 ~/.local/bin/send_buttons.py
 ```
+
+**Both aliases use `--global`** — this is what makes them survive gateway restarts. Without `--global`, the switch is session-only and resets on restart.
 
 ## Autoswitch Logic
 
@@ -91,6 +113,11 @@ cp bin/codex-profile-manager.py ~/.local/bin/codex-profile-manager.py
 cp bin/send_buttons.py         ~/.local/bin/send_buttons.py
 chmod 700 ~/.local/bin/codex-profile-manager.py
 chmod 700 ~/.local/bin/send_buttons.py
+
+# Add quick_commands to config.yaml (see above)
+
+# Restart gateway
+/restart
 
 # Verify no secrets
 bash ~/gptprof-hermes/tests/smoke.sh
