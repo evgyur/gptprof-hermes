@@ -27,6 +27,9 @@ USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_TIMEOUT = 8
 CACHE_MAX_AGE = 15 * 60
 CACHE_PATH = "/tmp/gptprof_usage_cache.json"
+CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+ACCESS_REFRESH_SKEW = 120
 
 # Keep callback models unchanged; only the visible labels mimic OpenClaw.
 PROFILES = [
@@ -87,6 +90,85 @@ def token_expiry_date(token: str) -> str:
         return dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc).date().isoformat()
     except Exception:
         return "unknown"
+
+
+def access_token_expiring(token: str, skew: int = ACCESS_REFRESH_SKEW) -> bool:
+    exp = _jwt_payload(token).get("exp")
+    if not isinstance(exp, (int, float)):
+        return True
+    return float(exp) <= time.time() + skew
+
+
+def save_profile(slug: str, data: dict[str, Any]) -> None:
+    save_json(os.path.join(HCP_DIR, f"{slug}.json"), data)
+
+
+def sync_active_auth(slug: str, profile: dict[str, Any]) -> None:
+    """Keep Hermes runtime auth in sync when the active gptprof token rotates."""
+    auth = load_json(AUTH_PATH, {})
+    if not isinstance(auth, dict):
+        return
+    codex = auth.get("codex")
+    if isinstance(codex, dict) and codex.get("profile") == slug:
+        codex["access_token"] = profile.get("access_token")
+        codex["refresh_token"] = profile.get("refresh_token")
+        codex.setdefault("plan", profile.get("plan"))
+        codex.setdefault("email", profile.get("email"))
+    pool_root = auth.get("credential_pool")
+    if isinstance(pool_root, dict):
+        pool = pool_root.get("openai-codex")
+        if isinstance(pool, list):
+            for item in pool:
+                if isinstance(item, dict) and item.get("source") == f"gptprof:{slug}":
+                    item["access_token"] = profile.get("access_token")
+                    item["refresh_token"] = profile.get("refresh_token")
+                    item["last_status"] = "ok"
+                    item["last_status_at"] = time.time()
+    save_json(AUTH_PATH, auth)
+
+
+async def refresh_profile_token(session: aiohttp.ClientSession, slug: str, profile: dict[str, Any]) -> tuple[bool, str | None]:
+    """Refresh an expired/near-expired Codex access token for usage checks."""
+    access_token = str(profile.get("access_token") or "")
+    refresh_token = str(profile.get("refresh_token") or "")
+    if not refresh_token or not access_token_expiring(access_token):
+        return False, None
+    try:
+        async with session.post(
+            CODEX_OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": CODEX_OAUTH_CLIENT_ID,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=USAGE_TIMEOUT),
+        ) as r:
+            if r.status != 200:
+                try:
+                    err_payload = await r.json()
+                    err_obj = err_payload.get("error") if isinstance(err_payload, dict) else None
+                    code = err_obj.get("code") if isinstance(err_obj, dict) else err_payload.get("error") if isinstance(err_payload, dict) else None
+                    if code:
+                        return False, str(code)
+                except Exception:
+                    pass
+                return False, f"refresh {r.status}"
+            payload = await r.json()
+    except Exception as exc:
+        return False, f"refresh {type(exc).__name__}"
+
+    new_access = payload.get("access_token")
+    if not isinstance(new_access, str) or not new_access.strip():
+        return False, "refresh missing access"
+    profile["access_token"] = new_access.strip()
+    new_refresh = payload.get("refresh_token")
+    if isinstance(new_refresh, str) and new_refresh.strip():
+        profile["refresh_token"] = new_refresh.strip()
+    profile["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    save_profile(slug, profile)
+    sync_active_auth(slug, profile)
+    return True, None
 
 
 def load_profiles() -> dict[str, dict[str, Any]]:
@@ -230,13 +312,23 @@ def pct_text(value: int | None) -> str:
 def profile_block(slug: str, plan: str, data: dict[str, Any], usage: dict[str, Any], active: bool) -> str:
     marker = "✅" if active else "▪️"
     status = " · active" if active else ""
-    refresh = "refresh ok" if data.get("refresh_token") else "refresh missing"
+    refresh_error = data.get("_refresh_error")
+    if refresh_error == "refresh_token_reused":
+        refresh = "refresh reused · new auth needed"
+    elif refresh_error:
+        refresh = f"refresh failed · {refresh_error}"
+    else:
+        refresh = "refresh ok" if data.get("refresh_token") else "refresh missing"
     expiry = token_expiry_date(str(data.get("access_token") or ""))
+    primary_left = usage.get('primary_left')
+    secondary_left = usage.get('secondary_left')
+    primary_reset = "unknown" if primary_left is None else format_duration((usage.get('primary_reset') or 0) - time.time())
+    secondary_reset = "unknown" if secondary_left is None else format_duration((usage.get('secondary_reset') or 0) - time.time())
     return "\n".join([
         f"{marker} {slug} [{dollar_label(slug, plan)}]{status}",
         f"🔐 {refresh} · expires {expiry}",
-        f"📊 5h: {pct_text(usage.get('primary_left'))} left · reset {format_duration((usage.get('primary_reset') or 0) - time.time())}",
-        f"📅 Week: {pct_text(usage.get('secondary_left'))} left · reset {format_duration((usage.get('secondary_reset') or 0) - time.time())}",
+        f"📊 5h: {pct_text(primary_left)} left · reset {primary_reset}",
+        f"📅 Week: {pct_text(secondary_left)} left · reset {secondary_reset}",
         f"🕒 Cache: {usage.get('cache') or 'unknown'}",
     ])
 
@@ -248,10 +340,6 @@ def route_model_label(model: str) -> str:
 
 
 async def main() -> None:
-    if not TOKEN or not CHIP_DM:
-        print("ERROR: TELEGRAM_BOT_TOKEN and CHIP_DM must be set")
-        return
-
     from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
     bot = Bot(token=TOKEN)
@@ -261,7 +349,18 @@ async def main() -> None:
 
     cache = load_cache()
     connector = aiohttp.TCPConnector(limit=6, force_close=True)
+    refresh_errors: dict[str, str] = {}
     async with aiohttp.ClientSession(connector=connector) as session:
+        for slug, _plan, _model in PROFILES:
+            profile = profiles.get(slug) or {}
+            if profile.get("access_token"):
+                refreshed, err = await refresh_profile_token(session, slug, profile)
+                if refreshed:
+                    profiles[slug] = profile
+                    cache.pop(slug, None)
+                elif err:
+                    profile["_refresh_error"] = err
+                    refresh_errors[slug] = err
         tasks = []
         for slug, _plan, _model in PROFILES:
             token = str((profiles.get(slug) or {}).get("access_token") or "")
@@ -301,7 +400,6 @@ async def main() -> None:
     ])
     rows.append([
         InlineKeyboardButton("➕ New auth", callback_data="gptprof:new_auth"),
-        InlineKeyboardButton("✅ Check auth", callback_data="gptprof:check_auth"),
     ])
     rows.append([
         InlineKeyboardButton("⤴ Back to Pi route", callback_data="gptprof:pi_route"),
