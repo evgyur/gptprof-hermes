@@ -26,11 +26,12 @@ Hermes-native skill for ChatGPT profile management: Telegram card with inline bu
 ## How the Card Works
 
 1. `send_buttons.py` reads profile tokens from `$HERMES_HCP/*.json`
-2. Fetches usage from `https://chatgpt.com/backend-api/wham/usage` for each profile in parallel
-3. Computes **remaining %** = `100 − used_percent` for both windows
-4. Sends a Telegram `InlineKeyboardMarkup` card to `$CHIP_DM`
-5. Each button carries `callback_data: "gptprof:<slug>:<model>"` (e.g. `gptprof:omnifocusme:gpt-5.4-mini`)
-6. After pressing a button → recommended `/new` to reset context
+2. Locally refreshes expired/near-expired Codex access tokens through OAuth refresh_token rotation
+3. Fetches usage from `https://chatgpt.com/backend-api/wham/usage` for each profile in parallel
+4. Computes **remaining %** = `100 − used_percent` for both windows
+5. Sends a Telegram `InlineKeyboardMarkup` card to `$CHIP_DM`
+6. Each button carries `callback_data: "gptprof:<slug>:<model>"` (e.g. `gptprof:omnifocusme:gpt-5.4-mini`)
+7. After pressing a button → recommended `/new` to reset context
 
 ## Callback Behavior (critical)
 
@@ -61,6 +62,9 @@ See `references/callback-behavior.md` for full details.
 | `HERMES_AUTH` | `/home/hermes/.hermes/auth.json` | Active profile detection |
 | `HERMES_CONFIG` | `/home/hermes/.hermes/config.yaml` | Model name display + global persistence |
 | `HERMES_HCP` | `/home/hermes/.hermes/skills/chip/hcp` | Profile token directory |
+| `GPTPROF_ACCESS_REFRESH_SKEW` | `172800` | Refresh access tokens this many seconds before expiry |
+| `GPTPROF_FORCE_REFRESH` | `0` | Set `1` for one-off validation/rotation |
+| `GPTPROF_INTEL64_OPENCLAW_SYNC` | `0` | Break-glass import from OpenClaw; not the primary path |
 
 ## Profile Token Directory
 
@@ -75,6 +79,42 @@ Tokens live in `$HERMES_HCP/*.json`, one file per profile slug:
 ```
 
 Each file must contain an `access_token` key. The active profile is read from `auth.json`'s `codex.profile` field.
+
+## Local Token Refresh
+
+Hermes can maintain its own OAuth tokens without treating OpenClaw as the canonical source:
+
+```bash
+/opt/hermes-agent/venv/bin/python3 ~/.local/bin/refresh_profiles.py
+/opt/hermes-agent/venv/bin/python3 ~/.local/bin/refresh_profiles.py --force  # validate/rotate now
+```
+
+Recommended systemd timer:
+
+```ini
+# /etc/systemd/system/gptprof-token-refresh.service
+[Service]
+Type=oneshot
+User=hermes
+Environment=GPTPROF_INTEL64_OPENCLAW_SYNC=0
+Environment=GPTPROF_ACCESS_REFRESH_SKEW=172800
+ExecStart=/opt/hermes-agent/venv/bin/python3 /home/hermes/.local/bin/refresh_profiles.py
+```
+
+```ini
+# /etc/systemd/system/gptprof-token-refresh.timer
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=gptprof-token-refresh.service
+
+[Install]
+WantedBy=timers.target
+```
+
+`refresh_token_reused` means the refresh token was already stale before this timer owned it; recover via a fresh device-code auth for that profile.
 
 ## config.yaml quick_commands Setup
 
@@ -111,8 +151,10 @@ git clone https://github.com/evgyur/gptprof-hermes.git ~/gptprof-hermes
 # Binaries
 cp bin/codex-profile-manager.py ~/.local/bin/codex-profile-manager.py
 cp bin/send_buttons.py         ~/.local/bin/send_buttons.py
+cp bin/refresh_profiles.py     ~/.local/bin/refresh_profiles.py
 chmod 700 ~/.local/bin/codex-profile-manager.py
 chmod 700 ~/.local/bin/send_buttons.py
+chmod 700 ~/.local/bin/refresh_profiles.py
 
 # Add quick_commands to config.yaml (see above)
 

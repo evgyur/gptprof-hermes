@@ -30,8 +30,10 @@ git clone https://github.com/evgyur/gptprof-hermes.git ~/gptprof-hermes
 # 2. Скопировать бинарники
 cp bin/codex-profile-manager.py ~/.local/bin/codex-profile-manager.py
 cp bin/send_buttons.py         ~/.local/bin/send_buttons.py
+cp bin/refresh_profiles.py     ~/.local/bin/refresh_profiles.py
 chmod 700 ~/.local/bin/codex-profile-manager.py
 chmod 700 ~/.local/bin/send_buttons.py
+chmod 700 ~/.local/bin/refresh_profiles.py
 
 # 3. Добавить quick_commands в config.yaml (см. ниже)
 
@@ -113,6 +115,50 @@ quick_commands:
 }
 ```
 
+### Локальное обновление OAuth-токенов
+
+`send_buttons.py` сам обновляет access token, если он истекает в ближайшие 48 часов. Для независимости от OpenClaw поставьте локальный timer:
+
+```ini
+# /etc/systemd/system/gptprof-token-refresh.service
+[Unit]
+Description=Refresh Hermes gptprof Codex OAuth tokens
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+WorkingDirectory=/home/hermes/.hermes/skills/chip/gptprof
+Environment=GPTPROF_INTEL64_OPENCLAW_SYNC=0
+Environment=GPTPROF_ACCESS_REFRESH_SKEW=172800
+ExecStart=/opt/hermes-agent/venv/bin/python3 /home/hermes/.hermes/skills/chip/gptprof/refresh_profiles.py
+```
+
+```ini
+# /etc/systemd/system/gptprof-token-refresh.timer
+[Unit]
+Description=Run Hermes gptprof Codex OAuth token refresh periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=gptprof-token-refresh.service
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now gptprof-token-refresh.timer
+sudo systemctl start gptprof-token-refresh.service
+```
+
+`GPTPROF_INTEL64_OPENCLAW_SYNC=1` оставлен только как break-glass импорт, если локальная копия уже протухла. Нормальный путь — локальный `refresh_profiles.py` + systemd timer.
+
 ### Autoswitch (автопереключение)
 
 `codex-profile-manager.py` умеет автоматически переключать профиль, если активный достиг 95% по любому окну:
@@ -147,8 +193,10 @@ bash tests/smoke.sh
 git clone https://github.com/evgyur/gptprof-hermes.git ~/gptprof-hermes
 cp bin/codex-profile-manager.py ~/.local/bin/
 cp bin/send_buttons.py         ~/.local/bin/
+cp bin/refresh_profiles.py     ~/.local/bin/
 chmod 700 ~/.local/bin/codex-profile-manager.py
 chmod 700 ~/.local/bin/send_buttons.py
+chmod 700 ~/.local/bin/refresh_profiles.py
 ```
 
 Add to `config.yaml` → `quick_commands`:
@@ -200,6 +248,7 @@ Fetched from `https://chatgpt.com/backend-api/wham/usage` with 15-minute local c
 gptprof-hermes/
 ├── bin/
 │   ├── codex-profile-manager.py   # upstream profile manager CLI
+│   ├── refresh_profiles.py        # local OAuth refresh timer target
 │   └── send_buttons.py            # Hermes-native card sender (sends card only)
 ├── plugin/
 │   ├── index.js                   # OpenClaw plugin bridge (stub)

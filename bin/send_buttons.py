@@ -30,8 +30,10 @@ CACHE_MAX_AGE = 15 * 60
 CACHE_PATH = "/tmp/gptprof_usage_cache.json"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
-ACCESS_REFRESH_SKEW = 120
-INTEL64_OPENCLAW_SYNC = os.getenv("GPTPROF_INTEL64_OPENCLAW_SYNC", "1") != "0"
+ACCESS_REFRESH_SKEW = int(os.getenv("GPTPROF_ACCESS_REFRESH_SKEW", str(48 * 60 * 60)))
+FORCE_REFRESH = os.getenv("GPTPROF_FORCE_REFRESH", "0") == "1"
+# intel64 OpenClaw is an explicit break-glass import path, not the primary refresh path.
+INTEL64_OPENCLAW_SYNC = os.getenv("GPTPROF_INTEL64_OPENCLAW_SYNC", "0") == "1"
 INTEL64_SSH_TARGET = os.getenv("GPTPROF_INTEL64_SSH_TARGET", "chip@138.201.30.209")
 INTEL64_OPENCLAW_PROFILES = os.getenv("GPTPROF_INTEL64_OPENCLAW_PROFILES", "/home/chip/.openclaw/codex-profiles")
 
@@ -236,7 +238,9 @@ async def refresh_profile_token(session: aiohttp.ClientSession, slug: str, profi
     """Refresh an expired/near-expired Codex access token for usage checks."""
     access_token = str(profile.get("access_token") or "")
     refresh_token = str(profile.get("refresh_token") or "")
-    if not refresh_token or not access_token_expiring(access_token):
+    if not refresh_token:
+        return False, "refresh missing"
+    if not FORCE_REFRESH and not access_token_expiring(access_token):
         return False, None
     try:
         async with session.post(
@@ -271,6 +275,7 @@ async def refresh_profile_token(session: aiohttp.ClientSession, slug: str, profi
     if isinstance(new_refresh, str) and new_refresh.strip():
         profile["refresh_token"] = new_refresh.strip()
     profile["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    profile["source"] = "hermes-local-refresh"
     profile.pop("_refresh_error", None)
     save_profile(slug, profile)
     sync_active_auth(slug, profile)
@@ -480,8 +485,10 @@ async def main() -> None:
         InlineKeyboardButton("🔄 Usage", callback_data="gptprof:refresh"),
         InlineKeyboardButton("🔁 Autoswitch", callback_data="gptprof:autoswitch"),
     ])
-    rows.append([InlineKeyboardButton("➕ New auth", callback_data="gptprof:new_auth")])
-    rows.append([InlineKeyboardButton("✅ Check auth", callback_data="gptprof:check_auth")])
+    rows.append([
+        InlineKeyboardButton("➕ New auth", callback_data="gptprof:new_auth"),
+        InlineKeyboardButton("✅ Check auth", callback_data="gptprof:check_auth"),
+    ])
     rows.append([InlineKeyboardButton("⤴ Back to Pi route", callback_data="gptprof:pi_route")])
     keyboard = InlineKeyboardMarkup(rows)
 
