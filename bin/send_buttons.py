@@ -12,6 +12,7 @@ import base64
 import datetime as dt
 import json
 import os
+import subprocess
 import time
 from typing import Any
 
@@ -30,8 +31,10 @@ CACHE_PATH = "/tmp/gptprof_usage_cache.json"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 ACCESS_REFRESH_SKEW = 120
+INTEL64_OPENCLAW_SYNC = os.getenv("GPTPROF_INTEL64_OPENCLAW_SYNC", "1") != "0"
+INTEL64_SSH_TARGET = os.getenv("GPTPROF_INTEL64_SSH_TARGET", "chip@138.201.30.209")
+INTEL64_OPENCLAW_PROFILES = os.getenv("GPTPROF_INTEL64_OPENCLAW_PROFILES", "/home/chip/.openclaw/codex-profiles")
 
-# Keep callback models unchanged; only the visible labels mimic OpenClaw.
 PROFILES = [
     ("gptinvest23", "Pro $200", "gpt-5.5"),
     ("markov495", "ProLite $100", "gpt-5.4"),
@@ -39,12 +42,18 @@ PROFILES = [
     ("omnifocusme", "Plus $20", "gpt-5.4-mini"),
 ]
 
-# OpenClaw display uses compact dollar labels. markov495 is shown as [$200] there.
 DISPLAY_PRICE = {
     "gptinvest23": "$200",
     "markov495": "$200",
     "mintsage": "$20",
     "omnifocusme": "$20",
+}
+
+DEFAULT_PLAN = {
+    "gptinvest23": "Pro $200",
+    "markov495": "ProLite $100",
+    "mintsage": "Plus $20",
+    "omnifocusme": "Plus $20",
 }
 
 
@@ -59,7 +68,8 @@ def load_json(path: str, default: Any) -> Any:
 def save_json(path: str, data: Any) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
     except Exception:
         pass
 
@@ -82,9 +92,19 @@ def _jwt_payload(token: str) -> dict[str, Any]:
         return {}
 
 
-def token_expiry_date(token: str) -> str:
+def access_token_exp(token: str) -> float:
     exp = _jwt_payload(token).get("exp")
-    if not isinstance(exp, (int, float)):
+    return float(exp) if isinstance(exp, (int, float)) else 0.0
+
+
+def access_token_expiring(token: str, skew: int = ACCESS_REFRESH_SKEW) -> bool:
+    exp = access_token_exp(token)
+    return not exp or exp <= time.time() + skew
+
+
+def token_expiry_date(token: str) -> str:
+    exp = access_token_exp(token)
+    if not exp:
         return "unknown"
     try:
         return dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc).date().isoformat()
@@ -92,15 +112,33 @@ def token_expiry_date(token: str) -> str:
         return "unknown"
 
 
-def access_token_expiring(token: str, skew: int = ACCESS_REFRESH_SKEW) -> bool:
-    exp = _jwt_payload(token).get("exp")
-    if not isinstance(exp, (int, float)):
-        return True
-    return float(exp) <= time.time() + skew
+def load_profiles() -> dict[str, dict[str, Any]]:
+    profiles: dict[str, dict[str, Any]] = {}
+    try:
+        names = sorted(os.listdir(HCP_DIR))
+    except Exception:
+        names = []
+    for fname in names:
+        if not fname.endswith(".json"):
+            continue
+        slug = fname[:-5]
+        data = load_json(os.path.join(HCP_DIR, fname), {})
+        if isinstance(data, dict):
+            profiles[slug] = data
+    return profiles
 
 
 def save_profile(slug: str, data: dict[str, Any]) -> None:
     save_json(os.path.join(HCP_DIR, f"{slug}.json"), data)
+
+
+def get_current_profile() -> str | None:
+    auth = load_json(AUTH_PATH, {})
+    if isinstance(auth, dict):
+        codex = auth.get("codex") or {}
+        if isinstance(codex, dict):
+            return codex.get("profile")
+    return None
 
 
 def sync_active_auth(slug: str, profile: dict[str, Any]) -> None:
@@ -125,6 +163,73 @@ def sync_active_auth(slug: str, profile: dict[str, Any]) -> None:
                     item["last_status"] = "ok"
                     item["last_status_at"] = time.time()
     save_json(AUTH_PATH, auth)
+
+
+def sync_from_intel64_openclaw(profiles: dict[str, dict[str, Any]], cache: dict[str, Any]) -> list[str]:
+    """Import fresher OpenClaw profile tokens from intel64, if reachable."""
+    if not INTEL64_OPENCLAW_SYNC:
+        return []
+    slugs = [slug for slug, _plan, _model in PROFILES]
+    script = f"""
+import json
+from pathlib import Path
+base = Path({INTEL64_OPENCLAW_PROFILES!r})
+out = {{}}
+for slug in {slugs!r}:
+    p = base / slug / 'auth.json'
+    try:
+        out[slug] = json.loads(p.read_text())
+    except Exception as exc:
+        out[slug] = {{'_error': type(exc).__name__}}
+print(json.dumps(out))
+""".strip()
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", INTEL64_SSH_TARGET, f"python3 - <<'PY'\n{script}\nPY"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        remote_profiles = json.loads(result.stdout)
+    except Exception:
+        return []
+
+    updated: list[str] = []
+    for slug in slugs:
+        remote = remote_profiles.get(slug)
+        if not isinstance(remote, dict) or remote.get("_error"):
+            continue
+        tokens = remote.get("tokens") if isinstance(remote.get("tokens"), dict) else remote
+        access_token = tokens.get("access_token") or remote.get("accessToken")
+        refresh_token = tokens.get("refresh_token") or remote.get("refreshToken")
+        if not isinstance(access_token, str) or not isinstance(refresh_token, str):
+            continue
+        local = profiles.get(slug) or {}
+        local_exp = access_token_exp(str(local.get("access_token") or ""))
+        remote_exp = access_token_exp(access_token)
+        # Pull when intel64 has a fresher token or local token is absent/expiring.
+        if remote_exp <= local_exp + 60 and not access_token_expiring(str(local.get("access_token") or "")):
+            continue
+        local.update({
+            "profile": slug,
+            "email": remote.get("email") or local.get("email") or f"{slug}@gmail.com",
+            "plan": local.get("plan") or DEFAULT_PLAN.get(slug, "Codex"),
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "last_refresh": remote.get("last_refresh") or local.get("last_refresh"),
+            "source": "intel64-openclaw",
+            "synced_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+        local.pop("_refresh_error", None)
+        profiles[slug] = local
+        save_profile(slug, local)
+        sync_active_auth(slug, local)
+        cache.pop(slug, None)
+        updated.append(slug)
+    return updated
 
 
 async def refresh_profile_token(session: aiohttp.ClientSession, slug: str, profile: dict[str, Any]) -> tuple[bool, str | None]:
@@ -166,34 +271,10 @@ async def refresh_profile_token(session: aiohttp.ClientSession, slug: str, profi
     if isinstance(new_refresh, str) and new_refresh.strip():
         profile["refresh_token"] = new_refresh.strip()
     profile["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    profile.pop("_refresh_error", None)
     save_profile(slug, profile)
     sync_active_auth(slug, profile)
     return True, None
-
-
-def load_profiles() -> dict[str, dict[str, Any]]:
-    profiles: dict[str, dict[str, Any]] = {}
-    try:
-        names = sorted(os.listdir(HCP_DIR))
-    except Exception:
-        names = []
-    for fname in names:
-        if not fname.endswith(".json"):
-            continue
-        slug = fname[:-5]
-        data = load_json(os.path.join(HCP_DIR, fname), {})
-        if isinstance(data, dict):
-            profiles[slug] = data
-    return profiles
-
-
-def get_current_profile() -> str | None:
-    auth = load_json(AUTH_PATH, {})
-    if isinstance(auth, dict):
-        codex = auth.get("codex") or {}
-        if isinstance(codex, dict):
-            return codex.get("profile")
-    return None
 
 
 def get_current_model() -> str:
@@ -320,10 +401,10 @@ def profile_block(slug: str, plan: str, data: dict[str, Any], usage: dict[str, A
     else:
         refresh = "refresh ok" if data.get("refresh_token") else "refresh missing"
     expiry = token_expiry_date(str(data.get("access_token") or ""))
-    primary_left = usage.get('primary_left')
-    secondary_left = usage.get('secondary_left')
-    primary_reset = "unknown" if primary_left is None else format_duration((usage.get('primary_reset') or 0) - time.time())
-    secondary_reset = "unknown" if secondary_left is None else format_duration((usage.get('secondary_reset') or 0) - time.time())
+    primary_left = usage.get("primary_left")
+    secondary_left = usage.get("secondary_left")
+    primary_reset = "unknown" if primary_left is None else format_duration((usage.get("primary_reset") or 0) - time.time())
+    secondary_reset = "unknown" if secondary_left is None else format_duration((usage.get("secondary_reset") or 0) - time.time())
     return "\n".join([
         f"{marker} {slug} [{dollar_label(slug, plan)}]{status}",
         f"🔐 {refresh} · expires {expiry}",
@@ -348,8 +429,9 @@ async def main() -> None:
     current_model = get_current_model()
 
     cache = load_cache()
-    connector = aiohttp.TCPConnector(limit=6, force_close=True)
+    sync_from_intel64_openclaw(profiles, cache)
     refresh_errors: dict[str, str] = {}
+    connector = aiohttp.TCPConnector(limit=6, force_close=True)
     async with aiohttp.ClientSession(connector=connector) as session:
         for slug, _plan, _model in PROFILES:
             profile = profiles.get(slug) or {}
@@ -398,12 +480,9 @@ async def main() -> None:
         InlineKeyboardButton("🔄 Usage", callback_data="gptprof:refresh"),
         InlineKeyboardButton("🔁 Autoswitch", callback_data="gptprof:autoswitch"),
     ])
-    rows.append([
-        InlineKeyboardButton("➕ New auth", callback_data="gptprof:new_auth"),
-    ])
-    rows.append([
-        InlineKeyboardButton("⤴ Back to Pi route", callback_data="gptprof:pi_route"),
-    ])
+    rows.append([InlineKeyboardButton("➕ New auth", callback_data="gptprof:new_auth")])
+    rows.append([InlineKeyboardButton("✅ Check auth", callback_data="gptprof:check_auth")])
+    rows.append([InlineKeyboardButton("⤴ Back to Pi route", callback_data="gptprof:pi_route")])
     keyboard = InlineKeyboardMarkup(rows)
 
     await bot.send_message(
@@ -412,7 +491,8 @@ async def main() -> None:
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
-    print("OK")
+    if os.getenv("GPTPROF_VERBOSE") == "1":
+        print("sent")
 
 
 if __name__ == "__main__":
