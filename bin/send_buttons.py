@@ -1,89 +1,206 @@
 #!/usr/bin/env python3
 """
-send_buttons.py — Hermes-native GPT profile card with inline buttons.
-Works with any Hermes setup that has:
-  - TELEGRAM_BOT_TOKEN env var
-  - auth.json with active Codex profile
-  - config.yaml with model settings
-  - hcp/ directory with profile JSON files
+OpenClaw-style GPT profile card for Chip.
 
-No tokens or secrets are stored in this script.
+Shows Codex route, active profile, auth/usage/cache metadata and inline buttons.
+The Telegram callback handler lives in /opt/hermes-agent/gateway/platforms/telegram.py.
 """
+from __future__ import annotations
+
 import asyncio
-import os
+import base64
+import datetime as dt
 import json
+import os
 import time
+from typing import Any
+
 import aiohttp
 import yaml
-from pathlib import Path
 
-# ── Config (override via env) ────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHIP_DM            = os.getenv("CHIP_DM", "")          # e.g. "123456789"
-AUTH_PATH          = os.getenv("HERMES_AUTH", "/home/hermes/.hermes/auth.json")
-CONFIG_PATH        = os.getenv("HERMES_CONFIG", "/home/hermes/.hermes/config.yaml")
-HCP_DIR            = os.getenv("HERMES_HCP", "/home/hermes/.hermes/skills/chip/hcp")
-USAGE_URL          = "https://chatgpt.com/backend-api/wham/usage"
-USAGE_TIMEOUT      = 8
-CACHE_MAX_AGE      = 15 * 60   # seconds
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHIP_DM = os.getenv("CHIP_DM", "")  # e.g. "123456789"
+AUTH_PATH = os.getenv("HERMES_AUTH", "/home/hermes/.hermes/auth.json")
+CONFIG_PATH = os.getenv("HERMES_CONFIG", "/home/hermes/.hermes/config.yaml")
+HCP_DIR = os.getenv("HERMES_HCP", "/home/hermes/.hermes/skills/chip/hcp")
+USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+USAGE_TIMEOUT = 8
+CACHE_MAX_AGE = 15 * 60
+CACHE_PATH = "/tmp/gptprof_usage_cache.json"
 
-# (slug, plan, model_name, emoji)
-# model_name must match what Hermes /model command expects (e.g. gpt-5.5, gpt-5.4, gpt-5.4-mini)
+# Keep callback models unchanged; only the visible labels mimic OpenClaw.
 PROFILES = [
-    ("gptinvest23",  "Pro $200",    "gpt-5.5",      "🤖"),
-    ("markov495",    "ProLite $100","gpt-5.4",      "⚡"),
-    ("mintsage",     "Plus $20",    "gpt-5.4-mini", "✨"),
-    ("omnifocusme",  "Plus $20",    "gpt-5.4-mini", "🎯"),
+    ("gptinvest23", "Pro $200", "gpt-5.5"),
+    ("markov495", "ProLite $100", "gpt-5.4"),
+    ("mintsage", "Plus $20", "gpt-5.4-mini"),
+    ("omnifocusme", "Plus $20", "gpt-5.4-mini"),
 ]
-PROFILE_EMOJI = {slug: emoji for slug, _, _, emoji in PROFILES}
-PROFILE_MODEL = {slug: model for slug, _, model, _ in PROFILES}
 
-_CACHE = "/tmp/gptprof_usage_cache.json"
+# OpenClaw display uses compact dollar labels. markov495 is shown as [$200] there.
+DISPLAY_PRICE = {
+    "gptinvest23": "$200",
+    "markov495": "$200",
+    "mintsage": "$20",
+    "omnifocusme": "$20",
+}
 
 
-def load_cache():
+def load_json(path: str, default: Any) -> Any:
     try:
-        with open(_CACHE) as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {}
+        return default
 
 
-def save_cache(data):
+def save_json(path: str, data: Any) -> None:
     try:
-        with open(_CACHE, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f)
     except Exception:
         pass
 
 
-def parse_usage(payload):
-    """Return (primary_rem_pct, secondary_rem_pct) from wham payload."""
-    if not payload:
-        return None, None
+def load_cache() -> dict[str, Any]:
+    data = load_json(CACHE_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_cache(data: dict[str, Any]) -> None:
+    save_json(CACHE_PATH, data)
+
+
+def _jwt_payload(token: str) -> dict[str, Any]:
+    try:
+        part = token.split(".")[1]
+        part += "=" * ((4 - len(part) % 4) % 4)
+        return json.loads(base64.urlsafe_b64decode(part.encode()))
+    except Exception:
+        return {}
+
+
+def token_expiry_date(token: str) -> str:
+    exp = _jwt_payload(token).get("exp")
+    if not isinstance(exp, (int, float)):
+        return "unknown"
+    try:
+        return dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc).date().isoformat()
+    except Exception:
+        return "unknown"
+
+
+def load_profiles() -> dict[str, dict[str, Any]]:
+    profiles: dict[str, dict[str, Any]] = {}
+    try:
+        names = sorted(os.listdir(HCP_DIR))
+    except Exception:
+        names = []
+    for fname in names:
+        if not fname.endswith(".json"):
+            continue
+        slug = fname[:-5]
+        data = load_json(os.path.join(HCP_DIR, fname), {})
+        if isinstance(data, dict):
+            profiles[slug] = data
+    return profiles
+
+
+def get_current_profile() -> str | None:
+    auth = load_json(AUTH_PATH, {})
+    if isinstance(auth, dict):
+        codex = auth.get("codex") or {}
+        if isinstance(codex, dict):
+            return codex.get("profile")
+    return None
+
+
+def get_current_model() -> str:
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        model = cfg.get("model", "minimax")
+        if isinstance(model, dict):
+            model = model.get("default") or model.get("model") or "minimax"
+        return str(model)
+    except Exception:
+        return "minimax"
+
+
+def pct_left(window: dict[str, Any] | None) -> int | None:
+    if not isinstance(window, dict):
+        return None
+    used = window.get("used_percent")
+    if not isinstance(used, (int, float)):
+        return None
+    return max(0, min(100, 100 - int(used)))
+
+
+def window_reset_at(window: dict[str, Any] | None) -> float | None:
+    if not isinstance(window, dict):
+        return None
+    reset_at = window.get("reset_at") or window.get("resets_at")
+    if isinstance(reset_at, (int, float)):
+        return float(reset_at)
+    seconds = window.get("seconds_until_reset")
+    if isinstance(seconds, (int, float)):
+        return time.time() + float(seconds)
+    return None
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    seconds = int(seconds)
+    if seconds <= 0:
+        return "expired"
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    return f"{minutes}m" if minutes else "<1m"
+
+
+def cache_label(fetched_at: float | None) -> str:
+    if not fetched_at:
+        return "unknown"
+    age = max(0, time.time() - float(fetched_at))
+    if age < 10:
+        label = "just now"
+    elif age < 60:
+        label = f"{int(age)}s ago"
+    elif age < 3600:
+        label = f"{int(age // 60)}m ago"
+    else:
+        label = f"{int(age // 3600)}h ago"
+    if age > CACHE_MAX_AGE:
+        label += " · stale"
+    return label
+
+
+def parse_usage(payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = payload or {}
     rl = payload.get("rate_limit") or {}
-    pw = rl.get("primary_window") or {}
-    sw = rl.get("secondary_window") or {}
-    pu = pw.get("used_percent")
-    su = sw.get("used_percent")
-    p = max(0, 100 - int(pu)) if isinstance(pu, (int, float)) else None
-    s = max(0, 100 - int(su)) if isinstance(su, (int, float)) else None
-    return p, s
+    primary = rl.get("primary_window") or payload.get("primary_window") or {}
+    secondary = rl.get("secondary_window") or payload.get("secondary_window") or {}
+    p = pct_left(primary)
+    s = pct_left(secondary)
+    p_reset = window_reset_at(primary)
+    s_reset = window_reset_at(secondary)
+    fetched = payload.get("_fetched")
+    return {
+        "primary_left": p,
+        "secondary_left": s,
+        "primary_reset": p_reset,
+        "secondary_reset": s_reset,
+        "cache": cache_label(fetched if isinstance(fetched, (int, float)) else None),
+    }
 
 
-def pct(p):
-    return f"{p}%" if p is not None else "—"
-
-
-async def fetch_usage(session, token, slug):
-    """Fetch usage for one profile. Returns (slug, primary_rem, secondary_rem, label_str)."""
-    cache = load_cache()
-    cached = cache.get(slug, {})
-    age = time.time() - cached.get("_fetched", 0)
-    if age < CACHE_MAX_AGE and "primary_window" in cached:
-        p, s = parse_usage(cached)
-        return slug, p, s, f"5ч:{pct(p)} нед:{pct(s)}"
-
+async def fetch_usage(session: aiohttp.ClientSession, token: str, slug: str, cache: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    cached = cache.get(slug, {}) if isinstance(cache.get(slug), dict) else {}
     headers = {
         "Authorization": f"Bearer {token}",
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -91,120 +208,111 @@ async def fetch_usage(session, token, slug):
         "Referer": "https://chatgpt.com/",
     }
     try:
-        async with session.get(
-            USAGE_URL, headers=headers,
-            timeout=aiohttp.ClientTimeout(total=USAGE_TIMEOUT)
-        ) as r:
+        async with session.get(USAGE_URL, headers=headers, timeout=aiohttp.ClientTimeout(total=USAGE_TIMEOUT)) as r:
             if r.status == 200:
                 data = await r.json()
                 data["_fetched"] = time.time()
                 cache[slug] = data
-                save_cache(cache)
-                p, s = parse_usage(data)
-                return slug, p, s, f"5ч:{pct(p)} нед:{pct(s)}"
+                return slug, parse_usage(data)
     except Exception:
         pass
-
-    # fallback to stale cache
-    if "primary_window" in cached:
-        p, s = parse_usage(cached)
-        return slug, p, s, f"5ч:{pct(p)} нед:{pct(s)}"
-    return slug, None, None, "—"
+    return slug, parse_usage(cached)
 
 
-def get_current_profile():
-    """Read active profile slug from Hermes auth.json."""
-    try:
-        with open(AUTH_PATH) as f:
-            auth = json.load(f)
-        return (auth.get("codex") or {}).get("profile")
-    except Exception:
-        return None
+def dollar_label(slug: str, plan: str) -> str:
+    return DISPLAY_PRICE.get(slug) or (plan.split("$", 1)[-1].join(["$", ""]) if "$" in plan else plan)
 
 
-def get_current_model():
-    """Read current model from Hermes config.yaml."""
-    try:
-        with open(CONFIG_PATH) as f:
-            cfg = yaml.safe_load(f)
-        m = cfg.get("model", "minimax")
-        if isinstance(m, dict):
-            m = m.get("default") or m.get("model") or "minimax"
-        return str(m)
-    except Exception:
-        return "minimax"
+def pct_text(value: int | None) -> str:
+    return "—" if value is None else f"{value}%"
 
 
-async def main():
-    if not TELEGRAM_BOT_TOKEN or not CHIP_DM:
+def profile_block(slug: str, plan: str, data: dict[str, Any], usage: dict[str, Any], active: bool) -> str:
+    marker = "✅" if active else "▪️"
+    status = " · active" if active else ""
+    refresh = "refresh ok" if data.get("refresh_token") else "refresh missing"
+    expiry = token_expiry_date(str(data.get("access_token") or ""))
+    return "\n".join([
+        f"{marker} {slug} [{dollar_label(slug, plan)}]{status}",
+        f"🔐 {refresh} · expires {expiry}",
+        f"📊 5h: {pct_text(usage.get('primary_left'))} left · reset {format_duration((usage.get('primary_reset') or 0) - time.time())}",
+        f"📅 Week: {pct_text(usage.get('secondary_left'))} left · reset {format_duration((usage.get('secondary_reset') or 0) - time.time())}",
+        f"🕒 Cache: {usage.get('cache') or 'unknown'}",
+    ])
+
+
+def route_model_label(model: str) -> str:
+    if model.startswith("openai/"):
+        return model
+    return f"openai/{model}" if model.startswith(("gpt-", "o")) else model
+
+
+async def main() -> None:
+    if not TOKEN or not CHIP_DM:
         print("ERROR: TELEGRAM_BOT_TOKEN and CHIP_DM must be set")
         return
 
     from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-    current_slug = get_current_profile()
+    bot = Bot(token=TOKEN)
+    profiles = load_profiles()
+    current_slug = get_current_profile() or PROFILES[0][0]
     current_model = get_current_model()
 
-    # load tokens from hcp dir
-    tokens = {}
-    hcp = Path(HCP_DIR)
-    if hcp.is_dir():
-        for f in hcp.glob("*.json"):
-            try:
-                d = json.loads(f.read_text())
-                tok = d.get("access_token", "")
-                if tok:
-                    tokens[f.stem] = tok
-            except Exception:
-                pass
-
-    # fetch all in parallel
+    cache = load_cache()
     connector = aiohttp.TCPConnector(limit=6, force_close=True)
-    async with aiohttp.ClientSession(connector=connector) as sess:
-        results = await asyncio.gather(*[
-            fetch_usage(sess, tok, slug) for slug, tok in tokens.items()
-        ])
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = []
+        for slug, _plan, _model in PROFILES:
+            token = str((profiles.get(slug) or {}).get("access_token") or "")
+            if token:
+                tasks.append(fetch_usage(session, token, slug, cache))
+        results = await asyncio.gather(*tasks) if tasks else []
+    save_cache(cache)
+    usage_map = {slug: usage for slug, usage in results}
 
-    usage = {slug: (p, s, lbl) for slug, p, s, lbl in results}
+    lines = [
+        "✅ Autoswitch: no switch needed",
+        f"🤖 GPT profile: {current_slug}",
+        "🧪 Route: native Codex trial",
+        f"🧠 Model: {route_model_label(current_model)}",
+        "⚙️ Runtime: codex",
+        f"↪️ Pi fallback available: openai-codex/{current_model} · runtime=pi",
+        "",
+    ]
 
-    # header
-    cur_emoji = PROFILE_EMOJI.get(current_slug, "🤖")
-    cur_plan  = next((p[1] for p in PROFILES if p[0] == current_slug), "")
-    cur_lbl   = usage.get(current_slug, (None, None, "—"))[2]
-    header = f"{cur_emoji} *{current_slug}* ({cur_plan}) — {cur_lbl}"
+    blocks = []
+    for slug, plan, _model in PROFILES:
+        blocks.append(profile_block(slug, plan, profiles.get(slug, {}), usage_map.get(slug, {}), slug == current_slug))
+    text = "\n\n".join(["\n".join(lines).rstrip(), *blocks])
 
-    # buttons — callback_data includes model for gateway handler
-    rows = []
-    for slug, plan, model, emoji in PROFILES:
-        p, s, lbl = usage.get(slug, (None, None, "—"))
-        parts = [emoji]
-        if slug == current_slug:
-            parts.insert(0, "✓")
-        parts.extend([slug, f"({lbl})"])
-        # callback_data format: "gptprof:<slug>:<model>"
-        # Gateway parses this as profile + model for config.yaml write
-        rows.append([InlineKeyboardButton(
-            " ".join(parts),
-            callback_data=f"gptprof:{slug}:{model}"
-        )])
+    profile_buttons = []
+    for slug, plan, model in PROFILES:
+        usage = usage_map.get(slug, {})
+        week = usage.get("secondary_left")
+        symbol = "✓" if slug == current_slug else ("⚠" if isinstance(week, int) and week <= 0 else "↔")
+        btn_text = f"{symbol} {pct_text(week)} {slug} [{dollar_label(slug, plan)}]"
+        profile_buttons.append(InlineKeyboardButton(btn_text, callback_data=f"gptprof:{slug}:{model}"))
 
-    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="gptprof:cancel")])
-
-    text = (
-        "*🤖 GPT Profile*\n\n"
-        f"{header}\n"
-        f"`📦 {current_model}`\n\n"
-        "Выбери профиль:\n\n"
-        "_(После выбора нажми /new)_\n"
-        "_(Изменение сохраняется глобально — переживает /restart)_"
-    )
+    rows = [profile_buttons[i:i + 2] for i in range(0, len(profile_buttons), 2)]
+    rows.append([
+        InlineKeyboardButton("🔄 Usage", callback_data="gptprof:refresh"),
+        InlineKeyboardButton("🔁 Autoswitch", callback_data="gptprof:autoswitch"),
+    ])
+    rows.append([
+        InlineKeyboardButton("➕ New auth", callback_data="gptprof:new_auth"),
+        InlineKeyboardButton("✅ Check auth", callback_data="gptprof:check_auth"),
+    ])
+    rows.append([
+        InlineKeyboardButton("⤴ Back to Pi route", callback_data="gptprof:pi_route"),
+    ])
+    keyboard = InlineKeyboardMarkup(rows)
 
     await bot.send_message(
         chat_id=int(CHIP_DM),
         text=text,
-        reply_markup=InlineKeyboardMarkup(rows),
-        parse_mode="Markdown",
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
     )
     print("OK")
 
