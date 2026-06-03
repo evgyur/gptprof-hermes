@@ -148,22 +148,60 @@ def sync_active_auth(slug: str, profile: dict[str, Any]) -> None:
     auth = load_json(AUTH_PATH, {})
     if not isinstance(auth, dict):
         return
+
     codex = auth.get("codex")
-    if isinstance(codex, dict) and codex.get("profile") == slug:
+    active_slug = codex.get("profile") if isinstance(codex, dict) else None
+    if isinstance(codex, dict) and active_slug == slug:
         codex["access_token"] = profile.get("access_token")
         codex["refresh_token"] = profile.get("refresh_token")
-        codex.setdefault("plan", profile.get("plan"))
-        codex.setdefault("email", profile.get("email"))
-    pool_root = auth.get("credential_pool")
-    if isinstance(pool_root, dict):
-        pool = pool_root.get("openai-codex")
-        if isinstance(pool, list):
-            for item in pool:
-                if isinstance(item, dict) and item.get("source") == f"gptprof:{slug}":
-                    item["access_token"] = profile.get("access_token")
-                    item["refresh_token"] = profile.get("refresh_token")
-                    item["last_status"] = "ok"
-                    item["last_status_at"] = time.time()
+        codex["plan"] = profile.get("plan") or codex.get("plan")
+        codex["email"] = profile.get("email") or codex.get("email")
+
+        providers = auth.setdefault("providers", {})
+        provider_state = providers.setdefault("openai-codex", {})
+        provider_tokens = dict(provider_state.get("tokens") or {})
+        provider_tokens.update({
+            "profile": slug,
+            "email": profile.get("email"),
+            "plan": profile.get("plan"),
+            "access_token": profile.get("access_token"),
+            "refresh_token": profile.get("refresh_token"),
+        })
+        provider_state["tokens"] = provider_tokens
+        provider_state["auth_mode"] = "chatgpt"
+        provider_state.pop("last_auth_error", None)
+        auth["active_provider"] = "openai-codex"
+
+    pool_root = auth.setdefault("credential_pool", {})
+    pool = pool_root.get("openai-codex")
+    if isinstance(pool, list):
+        source = f"gptprof:{slug}"
+        selected_entry = {
+            "source": source,
+            "profile": slug,
+            "label": slug,
+            "provider": "openai-codex",
+            "email": profile.get("email"),
+            "plan": profile.get("plan"),
+            "access_token": profile.get("access_token"),
+            "refresh_token": profile.get("refresh_token"),
+            "priority": 0,
+            "last_status": "ok",
+            "last_status_at": time.time(),
+        }
+        remaining_pool = []
+        for item in pool:
+            if not isinstance(item, dict):
+                continue
+            item_source = str(item.get("source") or "")
+            item_profile = str(item.get("profile") or item.get("label") or "")
+            if item_source in {source, "device_code"} or item_profile == slug:
+                continue
+            if item.get("priority") == 0:
+                item = {**item, "priority": 10}
+            remaining_pool.append(item)
+        pool_root["openai-codex"] = [selected_entry, *remaining_pool]
+
     save_json(AUTH_PATH, auth)
 
 
