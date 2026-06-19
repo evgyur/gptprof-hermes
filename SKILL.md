@@ -21,7 +21,7 @@ Hermes-native skill for ChatGPT profile management: Telegram card with inline bu
 | `/mmfast` | Switch back to `MiniMax-M2.7` with high reasoning, **persistent** (`--global`) |
 | `/gptprof status` | Full CLI status via `codex-profile-manager.py status` |
 | `/gptprof refresh` | Force-refresh usage cache |
-| `/gptprof autoswitch` | Run autoswitch logic (switches only if active is ≥95% and a healthy spare exists) |
+| `/gptprof autoswitch` | Run autoswitch logic (switches when active 5h or weekly remaining is ≤5%, or usage/auth error appears) |
 
 ## How the Card Works
 
@@ -65,6 +65,8 @@ See `references/callback-behavior.md` for full details.
 | `GPTPROF_ACCESS_REFRESH_SKEW` | `172800` | Refresh access tokens this many seconds before expiry |
 | `GPTPROF_FORCE_REFRESH` | `0` | Set `1` for one-off validation/rotation |
 | `GPTPROF_INTEL64_OPENCLAW_SYNC` | `0` | Break-glass import from OpenClaw; not the primary path |
+| `GPTPROF_AUTOSWITCH_THRESHOLD` | `5` | Switch when either 5h or weekly remaining is at/below this % |
+| `GPTPROF_AUTOSWITCH_STATE` | `/tmp/gptprof_autoswitch_state.json` | Last switch / no-candidate state |
 
 ## Profile Token Directory
 
@@ -115,6 +117,23 @@ WantedBy=timers.target
 ```
 
 `refresh_token_reused` means the refresh token was already stale before this timer owned it; recover via a fresh device-code auth for that profile.
+
+## Autoswitch cron
+
+Run the autoswitch script every 5 minutes if you want automatic profile rotation before a limit is exhausted:
+
+```bash
+*/5 * * * * /opt/hermes-agent/venv/bin/python3 ~/.local/bin/gptprof_autoswitch.py
+```
+
+Behavior:
+
+- checks active profile usage for both `primary_window` (5h) and `secondary_window` (weekly);
+- switches when either remaining window is `<= GPTPROF_AUTOSWITCH_THRESHOLD` (default `5`);
+- also switches if the active profile returns a usage/auth error;
+- chooses the healthiest available profile by highest `min(5h_left, week_left)`;
+- switches **auth only** and does not change the current model/provider route;
+- stays silent on no-op, printing stdout only on a switch or when no healthy alternative exists.
 
 ## config.yaml quick_commands Setup
 

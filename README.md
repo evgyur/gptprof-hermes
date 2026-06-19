@@ -19,7 +19,7 @@
 | `/gptprof` | Карточка профиля с кнопками (остаток % 5ч / нед) |
 | `/gptt` | Быстрый переход на `gpt-5.5` через Codex, **persistent** (`--global`) |
 | `/mmfast` | Переключает обратно на MiniMax-M2.7 (high reasoning), **persistent** (`--global`) |
-| Autoswitch | Автоматически переезжает на профиль с остатком >5%, если текущий исчерпан |
+| Autoswitch | Автоматически переезжает на самый здоровый профиль, если у текущего 5ч или неделя ≤5% остатка |
 
 ### Установка
 
@@ -31,9 +31,11 @@ git clone https://github.com/evgyur/gptprof-hermes.git ~/gptprof-hermes
 cp bin/codex-profile-manager.py ~/.local/bin/codex-profile-manager.py
 cp bin/send_buttons.py         ~/.local/bin/send_buttons.py
 cp bin/refresh_profiles.py     ~/.local/bin/refresh_profiles.py
+cp bin/gptprof_autoswitch.py   ~/.local/bin/gptprof_autoswitch.py
 chmod 700 ~/.local/bin/codex-profile-manager.py
 chmod 700 ~/.local/bin/send_buttons.py
 chmod 700 ~/.local/bin/refresh_profiles.py
+chmod 700 ~/.local/bin/gptprof_autoswitch.py
 
 # 3. Добавить quick_commands в config.yaml (см. ниже)
 
@@ -65,6 +67,14 @@ quick_commands:
 ```
 
 Данные берутся из `https://chatgpt.com/backend-api/wham/usage` с кешированием на 15 минут.
+
+### Autoswitch
+
+```bash
+*/5 * * * * /opt/hermes-agent/venv/bin/python3 ~/.local/bin/gptprof_autoswitch.py
+```
+
+Скрипт проверяет 5-часовое и недельное окно активного профиля. Если любое окно дошло до `≤5%` остатка или профиль вернул usage/auth error, он переключает **только OAuth-профиль** на самый здоровый доступный аккаунт. Модель/provider не меняются.
 
 ### Callback (нажатие кнопки профиля)
 

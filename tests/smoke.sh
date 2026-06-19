@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "=== Python syntax ==="
 python3 -m py_compile "$ROOT/bin/codex-profile-manager.py"
 python3 -m py_compile "$ROOT/bin/send_buttons.py"
+python3 -m py_compile "$ROOT/bin/gptprof_autoswitch.py"
 
 echo "=== JS syntax ==="
 if command -v node >/dev/null 2>&1; then
