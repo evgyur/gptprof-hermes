@@ -82,7 +82,7 @@ quick_commands:
 
 При нажатии кнопки `gptprof:<slug>:<model>` Hermes gateway (`gateway/platforms/telegram.py`) выполняет:
 
-1. Копирует `access_token` + `refresh_token` из `~/.hermes/skills/chip/hcp/<slug>.json` в `auth.json → codex`
+1. Копирует `access_token` + `refresh_token` из `~/.hermes/gptprof/profiles/<slug>.json` в `auth.json → codex`
 2. **Пишет глобальный config**: `model=<model>`, `provider=openai-codex` в `config.yaml` — эквивалент `/model <model> --provider openai-codex --global`
 3. Устанавливает session override на уровне gateway
 4. evict cached agent → рекомендует `/new` для новой сессии
@@ -96,11 +96,10 @@ quick_commands:
 Скилл работает с **локальным пулом профилей** в `$HERMES_HCP`:
 
 ```
-~/.hermes/skills/chip/hcp/
-├── gptinvest23.json    ← access_token профиля
-├── markov495.json
-├── mintsage.json
-└── omnifocusme.json
+~/.hermes/gptprof/profiles/
+├── profile1.json    ← access_token профиля
+├── profile2.json
+└── profile3.json
 ```
 
 Каждый JSON содержит OAuth-токен профиля:
@@ -119,7 +118,7 @@ quick_commands:
 ```json
 {
   "codex": {
-    "profile": "omnifocusme",
+    "profile": "profile3",
     "access_token": "<ACTIVE_TOKEN>"
   }
 }
@@ -139,10 +138,10 @@ After=network-online.target
 [Service]
 Type=oneshot
 User=hermes
-WorkingDirectory=/home/hermes/.hermes/skills/chip/gptprof
+WorkingDirectory=/home/hermes/gptprof-hermes
 Environment=GPTPROF_INTEL64_OPENCLAW_SYNC=0
 Environment=GPTPROF_ACCESS_REFRESH_SKEW=172800
-ExecStart=/opt/hermes-agent/venv/bin/python3 /home/hermes/.hermes/skills/chip/gptprof/refresh_profiles.py
+ExecStart=/opt/hermes-agent/venv/bin/python3 /home/hermes/gptprof-hermes/bin/refresh_profiles.py
 ```
 
 ```ini
@@ -230,7 +229,7 @@ Then `/restart` the gateway to pick up new commands.
 
 Button presses (`gptprof:<slug>:<model>`) are handled by Hermes gateway (`gateway/platforms/telegram.py`). On callback:
 
-1. Copies OAuth tokens from `~/.hermes/skills/chip/hcp/<slug>.json` → `auth.json → codex`
+1. Copies OAuth tokens from `~/.hermes/gptprof/profiles/<slug>.json` → `auth.json → codex`
 2. **Writes global config**: `model=<model>`, `provider=openai-codex` to `config.yaml` (equivalent to `/model <model> --provider openai-codex --global`)
 3. Sets session override at gateway level
 4. Evicts cached agent → recommends `/new`

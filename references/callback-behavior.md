@@ -12,8 +12,8 @@ hermes-agent/gateway/platforms/telegram.py
 
 ## Callback Data Format
 
-**Old format (broken):** `gptprof:omnifocusme`
-**Current format (correct):** `gptprof:omnifocusme:gpt-5.4-mini`
+**Old format (broken):** `gptprof:profile3`
+**Current format (correct):** `gptprof:profile3:gpt-5.5`
 
 The `:model` suffix is required — without it, the gateway cannot determine which GPT model to switch to.
 
@@ -25,26 +25,26 @@ The card must use:
 callback_data=f"gptprof:{slug}:{model}"
 ```
 
-Where `model` is one of: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`.
+Where `model` is a Hermes/OpenAI-Codex model such as `gpt-5.5`, `gpt-5.4`, or `gpt-5.4-mini`.
 
 ## Gateway Handler Flow
 
-When `callback_data = "gptprof:omnifocusme:gpt-5.4-mini"` is received:
+When `callback_data = "gptprof:profile3:gpt-5.5"` is received:
 
 ```python
 parts = data.split(":")
-# ["gptprof", "omnifocusme", "gpt-5.4-mini"]
+# ["gptprof", "profile3", "gpt-5.5"]
 _, profile, model = parts[:3]
 await _handle_gptprof_callback(query, profile, model)
 ```
 
 Inside `_handle_gptprof_callback`:
 
-1. **Copy OAuth tokens** — reads `~/.hermes/skills/chip/hcp/<profile>.json`, copies `access_token` + `refresh_token` to `auth.json → codex`
+1. **Copy OAuth tokens** — reads `~/.hermes/gptprof/profiles/<profile>.json`, copies `access_token` + `refresh_token` to `auth.json → codex`
 
 2. **Write global config.yaml** (critical step):
    ```python
-   cfg["model"] = model          # "gpt-5.4-mini"
+   cfg["model"] = model          # "gpt-5.5"
    cfg["provider"] = "openai-codex"
    with open(config_path, "w") as f:
        yaml.safe_dump(cfg, f)
@@ -58,8 +58,8 @@ Inside `_handle_gptprof_callback`:
 5. **Confirm to user** — shows alert and edits message:
    ```
    ✅ Профиль активирован
-   `omnifocusme` (Plus $20)
-   Модель: `gpt-5.4-mini`
+   `profile3` (Plus)
+   Модель: `gpt-5.5`
    ✅ Сохранено глобально в `config.yaml`.
    Нажми `/new` для новой сессии с выбранным GPT.
    ```
@@ -70,7 +70,7 @@ Without step 2, the model switch would only survive until the next gateway resta
 
 With step 2, `config.yaml` now contains:
 ```yaml
-model: gpt-5.4-mini
+model: gpt-5.5
 provider: openai-codex
 ```
 

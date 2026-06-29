@@ -562,7 +562,7 @@ def ensure_native_codex_route(model=None, reason="manual"):
 
 
 def backup_path(path, stamp):
-    rel = str(Path(path).expanduser()).replace(str(HOME), "home-chip", 1).strip("/").replace("/", "__")
+    rel = str(Path(path).expanduser()).replace(str(HOME), "home-user", 1).strip("/").replace("/", "__")
     dst = BACKUPS / f"codex-profile-switcher-{stamp}" / rel
     dst.parent.mkdir(parents=True, exist_ok=True)
     if Path(path).is_symlink():

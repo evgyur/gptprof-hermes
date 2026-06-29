@@ -29,8 +29,8 @@ Hermes-native skill for ChatGPT profile management: Telegram card with inline bu
 2. Locally refreshes expired/near-expired Codex access tokens through OAuth refresh_token rotation
 3. Fetches usage from `https://chatgpt.com/backend-api/wham/usage` for each profile in parallel
 4. Computes **remaining %** = `100 − used_percent` for both windows
-5. Sends a Telegram `InlineKeyboardMarkup` card to `$CHIP_DM`
-6. Each button carries `callback_data: "gptprof:<slug>:<model>"` (e.g. `gptprof:omnifocusme:gpt-5.4-mini`)
+5. Sends a Telegram `InlineKeyboardMarkup` card to `$GPTPROF_CHAT_ID`
+6. Each button carries `callback_data: "gptprof:<slug>:<model>"` (e.g. `gptprof:profile3:gpt-5.5`)
 7. After pressing a button → recommended `/new` to reset context
 
 ## Callback Behavior (critical)
@@ -39,10 +39,10 @@ Button presses are handled by **Hermes gateway** (`gateway/platforms/telegram.py
 
 On `gptprof:<slug>:<model>` callback, the gateway:
 
-1. Copies `access_token` + `refresh_token` from `~/.hermes/skills/chip/hcp/<slug>.json` → `auth.json → codex`
+1. Copies `access_token` + `refresh_token` from `~/.hermes/gptprof/profiles/<slug>.json` → `auth.json → codex`
 2. **Writes global config.yaml**:
    ```python
-   cfg["model"] = model          # e.g. "gpt-5.4-mini"
+   cfg["model"] = model          # e.g. "gpt-5.5"
    cfg["provider"] = "openai-codex"
    ```
    This is equivalent to `/model <model> --provider openai-codex --global`.
@@ -58,10 +58,10 @@ See `references/callback-behavior.md` for full details.
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `TELEGRAM_BOT_TOKEN` | env | Bot token for sending cards |
-| `CHIP_DM` | env | Telegram chat ID for card delivery |
+| `GPTPROF_CHAT_ID` | env | Telegram chat ID for card delivery |
 | `HERMES_AUTH` | `/home/hermes/.hermes/auth.json` | Active profile detection |
 | `HERMES_CONFIG` | `/home/hermes/.hermes/config.yaml` | Model name display + global persistence |
-| `HERMES_HCP` | `/home/hermes/.hermes/skills/chip/hcp` | Profile token directory |
+| `HERMES_HCP` | `~/.hermes/gptprof/profiles` | Profile token directory |
 | `GPTPROF_ACCESS_REFRESH_SKEW` | `172800` | Refresh access tokens this many seconds before expiry |
 | `GPTPROF_FORCE_REFRESH` | `0` | Set `1` for one-off validation/rotation |
 | `GPTPROF_INTEL64_OPENCLAW_SYNC` | `0` | Break-glass import from OpenClaw; not the primary path |
@@ -73,11 +73,10 @@ See `references/callback-behavior.md` for full details.
 Tokens live in `$HERMES_HCP/*.json`, one file per profile slug:
 
 ```
-~/.hermes/skills/chip/hcp/
-├── gptinvest23.json
-├── markov495.json
-├── mintsage.json
-└── omnifocusme.json
+~/.hermes/gptprof/profiles/
+├── profile1.json
+├── profile2.json
+└── profile3.json
 ```
 
 Each file must contain an `access_token` key. The active profile is read from `auth.json`'s `codex.profile` field.
@@ -193,3 +192,30 @@ bash ~/gptprof-hermes/tests/smoke.sh
 ## Upstream
 
 Built on top of [evgyur/gptprof-public](https://github.com/evgyur/gptprof-public) — the sanitized public version of the profile manager CLI (`codex-profile-manager.py`).
+
+## Output Contract
+
+When this skill is invoked, return one of:
+
+- a rendered Telegram profile card from `bin/send_buttons.py`;
+- a concise status/autoswitch result from `bin/codex-profile-manager.py` or `bin/gptprof_autoswitch.py`;
+- a setup/configuration checklist that keeps all OAuth tokens and Telegram tokens outside git.
+
+Never print `access_token`, `refresh_token`, Telegram bot tokens, or raw `auth.json` contents in chat output.
+
+## Quick Test Checklist
+
+Before publishing changes:
+
+- [ ] `python3 -m py_compile bin/*.py` passes.
+- [ ] `node --check plugin/index.js` passes when Node is available.
+- [ ] `bash tests/smoke.sh` passes.
+- [ ] Public hygiene scan finds no private operator names, chat IDs, host paths, or real-looking tokens.
+- [ ] Any profile examples use placeholders such as `profile1`, not real account slugs or emails.
+
+## Done Criteria
+
+- [ ] Runtime scripts are portable and configured by env vars (`HERMES_AUTH`, `HERMES_HCP`, `GPTPROF_CHAT_ID`).
+- [ ] Public docs describe a generic install, not a private deployment.
+- [ ] Smoke tests include both syntax checks and public-hygiene checks.
+- [ ] Repository has no committed OAuth tokens, bot tokens, private keys, personal chat IDs, or private host paths.

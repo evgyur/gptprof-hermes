@@ -312,7 +312,7 @@ function scheduleRestartAfterAutoswitch(config, autoswitched) {
 function sessionStorePathForKey(sessionKey) {
   const match = String(sessionKey || "").match(/^agent:([a-z0-9._-]+):/i);
   if (!match) return "";
-  return `${process.env.HOME || "/home/chip"}/.openclaw/agents/${match[1]}/sessions/sessions.json`;
+  return `${process.env.HOME || ""}/.openclaw/agents/${match[1]}/sessions/sessions.json`;
 }
 
 function applySlashModelOverride(sessionKey, selection) {
@@ -411,7 +411,7 @@ function sessionKeyFromEventOrContext(event, context) {
   if (direct) return direct;
   const senderId = event?.senderId || context?.senderId || event?.from || context?.from;
   const channel = event?.channel || context?.channel;
-  if (channel === "telegram" && senderId) return `agent:chipdm:telegram:direct:${senderId}`;
+  if (channel === "telegram" && senderId) return `agent:telegram:direct:${senderId}`;
   return "";
 }
 

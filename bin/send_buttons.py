@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-OpenClaw-style GPT profile card for Chip.
+Public GPT profile card for Hermes.
 
 Shows Codex route, active profile, auth/usage/cache metadata and inline buttons.
-The Telegram callback handler lives in /opt/hermes-agent/gateway/platforms/telegram.py.
+The Telegram callback handler lives in the Hermes gateway deployment.
 """
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ import aiohttp
 import yaml
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHIP_DM = os.getenv("CHIP_DM", "")  # e.g. "123456789"
+TARGET_CHAT_ID = os.getenv("GPTPROF_CHAT_ID", "")  # e.g. "123456789"
 AUTH_PATH = os.getenv("HERMES_AUTH", "/home/hermes/.hermes/auth.json")
 CONFIG_PATH = os.getenv("HERMES_CONFIG", "/home/hermes/.hermes/config.yaml")
-HCP_DIR = os.getenv("HERMES_HCP", "/home/hermes/.hermes/skills/chip/hcp")
+HCP_DIR = os.path.expanduser(os.getenv("HERMES_HCP", "~/.hermes/gptprof/profiles"))
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_TIMEOUT = 8
 CACHE_MAX_AGE = 15 * 60
@@ -32,31 +32,31 @@ CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 ACCESS_REFRESH_SKEW = int(os.getenv("GPTPROF_ACCESS_REFRESH_SKEW", str(48 * 60 * 60)))
 FORCE_REFRESH = os.getenv("GPTPROF_FORCE_REFRESH", "0") == "1"
-# intel64 OpenClaw is an explicit break-glass import path, not the primary refresh path.
+# Optional external OpenClaw import is a break-glass path, not the primary refresh path.
 INTEL64_OPENCLAW_SYNC = os.getenv("GPTPROF_INTEL64_OPENCLAW_SYNC", "0") == "1"
-INTEL64_SSH_TARGET = os.getenv("GPTPROF_INTEL64_SSH_TARGET", "chip@138.201.30.209")
-INTEL64_OPENCLAW_PROFILES = os.getenv("GPTPROF_INTEL64_OPENCLAW_PROFILES", "/home/chip/.openclaw/codex-profiles")
+INTEL64_SSH_TARGET = os.getenv("GPTPROF_INTEL64_SSH_TARGET", "")
+INTEL64_OPENCLAW_PROFILES = os.getenv("GPTPROF_INTEL64_OPENCLAW_PROFILES", "~/.openclaw/codex-profiles")
 
 PROFILES = [
-    ("gptinvest23", "Pro $200", "gpt-5.5"),
-    ("markov495", "ProLite $100", "gpt-5.4"),
-    ("mintsage", "Plus $20", "gpt-5.4-mini"),
-    ("omnifocusme", "Plus $20", "gpt-5.4-mini"),
+    ("profile1", "Pro", "gpt-5.5"),
+    ("profile2", "Pro", "gpt-5.5"),
+    ("profile3", "Plus", "gpt-5.4-mini"),
 ]
+DEFAULT_PROFILE_SLUGS = [slug for slug, _plan, _model in PROFILES]
 
 DISPLAY_PRICE = {
-    "gptinvest23": "$200",
-    "markov495": "$200",
-    "mintsage": "$20",
-    "omnifocusme": "$20",
+    "profile1": "Pro",
+    "profile2": "Pro",
+    "profile3": "Plus",
 }
 
 DEFAULT_PLAN = {
-    "gptinvest23": "Pro $200",
-    "markov495": "ProLite $100",
-    "mintsage": "Plus $20",
-    "omnifocusme": "Plus $20",
+    "profile1": "Pro",
+    "profile2": "Pro",
+    "profile3": "Plus",
 }
+
+PLAN_LABELS = {}
 
 
 def load_json(path: str, default: Any) -> Any:
@@ -134,6 +134,28 @@ def save_profile(slug: str, data: dict[str, Any]) -> None:
     save_json(os.path.join(HCP_DIR, f"{slug}.json"), data)
 
 
+def profile_catalog(profiles: dict[str, dict[str, Any]]) -> list[tuple[str, str, str]]:
+    seen: set[str] = set()
+    items: list[tuple[str, str, str]] = []
+    for slug, default_plan, model in PROFILES:
+        data = profiles.get(slug) or {}
+        plan = normalize_plan(str(data.get("plan") or default_plan))
+        items.append((slug, plan, model))
+        seen.add(slug)
+    for slug in sorted(profiles):
+        if slug in seen:
+            continue
+        data = profiles.get(slug) or {}
+        plan = normalize_plan(str(data.get("plan") or DEFAULT_PLAN.get(slug) or "OpenAI"))
+        model = str(data.get("model") or "gpt-5.5")
+        items.append((slug, plan, model))
+    return items
+
+
+def normalize_plan(plan: str) -> str:
+    return PLAN_LABELS.get(plan.strip().lower(), plan)
+
+
 def get_current_profile() -> str | None:
     auth = load_json(AUTH_PATH, {})
     if isinstance(auth, dict):
@@ -205,15 +227,25 @@ def sync_active_auth(slug: str, profile: dict[str, Any]) -> None:
     save_json(AUTH_PATH, auth)
 
 
-def sync_from_intel64_openclaw(profiles: dict[str, dict[str, Any]], cache: dict[str, Any]) -> list[str]:
-    """Import fresher OpenClaw profile tokens from intel64, if reachable."""
-    if not INTEL64_OPENCLAW_SYNC:
+def sync_from_intel64_openclaw(
+    profiles: dict[str, dict[str, Any]],
+    cache: dict[str, Any],
+    only_slugs: list[str] | None = None,
+    force: bool = False,
+) -> list[str]:
+    """Import OpenClaw profile tokens from an optional external host, if reachable."""
+    if not INTEL64_OPENCLAW_SYNC and not force:
         return []
-    slugs = [slug for slug, _plan, _model in PROFILES]
+    if not INTEL64_SSH_TARGET:
+        return []
+    wanted = set(only_slugs or [])
+    slugs = [slug for slug, _plan, _model in PROFILES if not wanted or slug in wanted]
+    if not slugs:
+        return []
     script = f"""
 import json
 from pathlib import Path
-base = Path({INTEL64_OPENCLAW_PROFILES!r})
+base = Path({os.path.expanduser(INTEL64_OPENCLAW_PROFILES)!r})
 out = {{}}
 for slug in {slugs!r}:
     p = base / slug / 'auth.json'
@@ -347,7 +379,11 @@ def window_reset_at(window: dict[str, Any] | None) -> float | None:
     reset_at = window.get("reset_at") or window.get("resets_at")
     if isinstance(reset_at, (int, float)):
         return float(reset_at)
-    seconds = window.get("seconds_until_reset")
+    seconds = (
+        window.get("seconds_until_reset")
+        or window.get("reset_after_seconds")
+        or window.get("reset_in_seconds")
+    )
     if isinstance(seconds, (int, float)):
         return time.time() + float(seconds)
     return None
@@ -367,6 +403,19 @@ def format_duration(seconds: float | None) -> str:
     if hours:
         return f"{hours}h {minutes}m" if minutes else f"{hours}h"
     return f"{minutes}m" if minutes else "<1m"
+
+
+def reset_text(reset_at: float | None, usage_error: str | None = None) -> str:
+    if isinstance(reset_at, (int, float)):
+        return format_duration(float(reset_at) - time.time())
+    if usage_error:
+        if "token_revoked" in usage_error:
+            return "token revoked · new auth needed"
+        if "token_expired" in usage_error:
+            return "token expired · new auth needed"
+        return f"unavailable · {usage_error}"
+    return "unknown"
+
 
 
 def cache_label(fetched_at: float | None) -> str:
@@ -420,13 +469,35 @@ async def fetch_usage(session: aiohttp.ClientSession, token: str, slug: str, cac
                 data["_fetched"] = time.time()
                 cache[slug] = data
                 return slug, parse_usage(data)
-    except Exception:
-        pass
+            parsed = parse_usage(cached)
+            try:
+                err_payload = await r.json(content_type=None)
+                err = err_payload.get("error") if isinstance(err_payload, dict) else None
+                code = err.get("code") if isinstance(err, dict) else None
+                message = err.get("message") if isinstance(err, dict) else None
+                if code:
+                    parsed["usage_error"] = str(code)
+                elif message:
+                    parsed["usage_error"] = str(message)[:80]
+                else:
+                    parsed["usage_error"] = f"usage {r.status}"
+            except Exception:
+                parsed["usage_error"] = f"usage {r.status}"
+            return slug, parsed
+    except Exception as exc:
+        parsed = parse_usage(cached)
+        parsed["usage_error"] = f"usage {type(exc).__name__}"
+        return slug, parsed
     return slug, parse_usage(cached)
 
 
 def dollar_label(slug: str, plan: str) -> str:
-    return DISPLAY_PRICE.get(slug) or (plan.split("$", 1)[-1].join(["$", ""]) if "$" in plan else plan)
+    plan = normalize_plan(plan)
+    if "$" in plan:
+        return plan.split("$", 1)[-1].join(["$", ""])
+    if plan:
+        return plan
+    return DISPLAY_PRICE.get(slug) or plan
 
 
 def pct_text(value: int | None) -> str:
@@ -436,6 +507,7 @@ def pct_text(value: int | None) -> str:
 def profile_block(slug: str, plan: str, data: dict[str, Any], usage: dict[str, Any], active: bool) -> str:
     marker = "✅" if active else "▪️"
     status = " · active" if active else ""
+    plan = normalize_plan(plan)
     refresh_error = data.get("_refresh_error")
     if refresh_error == "refresh_token_reused":
         refresh = "refresh reused · new auth needed"
@@ -446,15 +518,19 @@ def profile_block(slug: str, plan: str, data: dict[str, Any], usage: dict[str, A
     expiry = token_expiry_date(str(data.get("access_token") or ""))
     primary_left = usage.get("primary_left")
     secondary_left = usage.get("secondary_left")
-    primary_reset = "unknown" if primary_left is None else format_duration((usage.get("primary_reset") or 0) - time.time())
-    secondary_reset = "unknown" if secondary_left is None else format_duration((usage.get("secondary_reset") or 0) - time.time())
-    return "\n".join([
+    usage_error = str(usage.get("usage_error") or "") or None
+    primary_reset = reset_text(usage.get("primary_reset"), usage_error)
+    secondary_reset = reset_text(usage.get("secondary_reset"), usage_error)
+    lines = [
         f"{marker} {slug} [{dollar_label(slug, plan)}]{status}",
         f"🔐 {refresh} · expires {expiry}",
         f"📊 5h: {pct_text(primary_left)} left · reset {primary_reset}",
         f"📅 Week: {pct_text(secondary_left)} left · reset {secondary_reset}",
         f"🕒 Cache: {usage.get('cache') or 'unknown'}",
-    ])
+    ]
+    if usage.get("usage_error"):
+        lines.append(f"⚠️ Usage API: {usage['usage_error']}")
+    return "\n".join(lines)
 
 
 def route_model_label(model: str) -> str:
@@ -468,7 +544,8 @@ async def main() -> None:
 
     bot = Bot(token=TOKEN)
     profiles = load_profiles()
-    current_slug = get_current_profile() or PROFILES[0][0]
+    catalog = profile_catalog(profiles)
+    current_slug = get_current_profile() or (catalog[0][0] if catalog else "")
     current_model = get_current_model()
 
     cache = load_cache()
@@ -476,7 +553,7 @@ async def main() -> None:
     refresh_errors: dict[str, str] = {}
     connector = aiohttp.TCPConnector(limit=6, force_close=True)
     async with aiohttp.ClientSession(connector=connector) as session:
-        for slug, _plan, _model in PROFILES:
+        for slug, _plan, _model in catalog:
             profile = profiles.get(slug) or {}
             if profile.get("access_token"):
                 refreshed, err = await refresh_profile_token(session, slug, profile)
@@ -487,7 +564,7 @@ async def main() -> None:
                     profile["_refresh_error"] = err
                     refresh_errors[slug] = err
         tasks = []
-        for slug, _plan, _model in PROFILES:
+        for slug, _plan, _model in catalog:
             token = str((profiles.get(slug) or {}).get("access_token") or "")
             if token:
                 tasks.append(fetch_usage(session, token, slug, cache))
@@ -506,12 +583,12 @@ async def main() -> None:
     ]
 
     blocks = []
-    for slug, plan, _model in PROFILES:
+    for slug, plan, _model in catalog:
         blocks.append(profile_block(slug, plan, profiles.get(slug, {}), usage_map.get(slug, {}), slug == current_slug))
     text = "\n\n".join(["\n".join(lines).rstrip(), *blocks])
 
     profile_buttons = []
-    for slug, plan, model in PROFILES:
+    for slug, plan, model in catalog:
         usage = usage_map.get(slug, {})
         week = usage.get("secondary_left")
         symbol = "✓" if slug == current_slug else ("⚠" if isinstance(week, int) and week <= 0 else "↔")
@@ -531,7 +608,7 @@ async def main() -> None:
     keyboard = InlineKeyboardMarkup(rows)
 
     await bot.send_message(
-        chat_id=int(CHIP_DM),
+        chat_id=int(TARGET_CHAT_ID),
         text=text,
         reply_markup=keyboard,
         disable_web_page_preview=True,

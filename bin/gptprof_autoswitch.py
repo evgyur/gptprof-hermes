@@ -139,8 +139,6 @@ def switch_profile_auth(slug: str, profile: dict[str, Any]) -> None:
         rest.append(item)
     pool_root["openai-codex"] = [selected, *rest]
     gptprof.save_json(str(AUTH_PATH), auth)
-    if hasattr(gptprof, "sync_human20bot_copy_only"):
-        gptprof.sync_human20bot_copy_only(slug, profile)
 
 
 async def collect_usage(profiles: dict[str, dict[str, Any]], catalog: list[tuple[str, str, str]]) -> dict[str, dict[str, Any]]:
